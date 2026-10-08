@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+"""Local, agent-neutral work context helper."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import sys
+
+
+MARKER_START = "<!-- workctx:start -->"
+MARKER_END = "<!-- workctx:end -->"
+INSTRUCTION = f"""{MARKER_START}
+## Shared work context
+
+- At the start of a task, read `.workctx/STATE.md` when it exists. Use it as a handoff snapshot; the user's current request takes priority.
+- When the user asks to save progress, or before ending a multi-step task, update `.workctx/STATE.md` in Korean. Keep the goal, current state, completed work, one concrete next action, decisions, relevant files, and local update time current.
+- Preserve useful decisions and completed work. Do not replace the user's request with stale context.
+- If the file does not exist, continue the task normally. Do not create it unless the user asks to initialize workctx or save a handoff.
+{MARKER_END}"""
+
+STATE_TEMPLATE = """# 작업 상태
+
+## 목표
+<!-- 이번 작업의 완료 조건 -->
+
+## 현재 상태
+<!-- 현재 진행 상황 또는 막힌 점 -->
+
+## 완료
+- 아직 없음
+
+## 다음 행동
+<!-- 바로 실행할 수 있는 행동 하나 -->
+
+## 결정 사항
+- 아직 없음
+
+## 관련 파일
+- 아직 없음
+
+## 갱신 시각
+초기화됨
+"""
+
+
+def project_root(path: Path) -> Path:
+    """Resolve a requested directory to its Git root, or use it directly."""
+    target = path.expanduser().resolve()
+    if not target.exists():
+        raise FileNotFoundError(f"경로가 없습니다: {target}")
+    if not target.is_dir():
+        raise NotADirectoryError(f"폴더가 아닙니다: {target}")
+
+    for candidate in (target, *target.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return target
+
+
+def merge_instruction(path: Path) -> bool:
+    """Append or refresh our marked block without touching other content."""
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    if MARKER_START in existing and MARKER_END in existing:
+        start = existing.index(MARKER_START)
+        end = existing.index(MARKER_END, start) + len(MARKER_END)
+        updated = existing[:start] + INSTRUCTION + existing[end:]
+    else:
+        separator = "\n" if existing and not existing.endswith("\n") else ""
+        updated = existing + separator + ("\n" if existing else "") + INSTRUCTION + "\n"
+
+    if updated == existing:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(updated, encoding="utf-8")
+    return True
+
+
+def init_project(path: Path) -> int:
+    root = project_root(path)
+    state = root / ".workctx" / "STATE.md"
+    created_state = not state.exists()
+    if created_state:
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(STATE_TEMPLATE, encoding="utf-8")
+
+    changed = [name for name in ("AGENTS.md", "CLAUDE.md") if merge_instruction(root / name)]
+    print(f"프로젝트: {root}")
+    print(f"작업 기록: {state}" + (" (생성)" if created_state else " (기존 파일 보존)"))
+    if changed:
+        print("안내 추가: " + ", ".join(changed))
+    else:
+        print("에이전트 안내는 이미 최신 상태입니다.")
+    return 0
+
+
+def show_project(path: Path) -> int:
+    root = project_root(path)
+    state = root / ".workctx" / "STATE.md"
+    if not state.exists():
+        print(f"작업 기록이 없습니다: {state}", file=sys.stderr)
+        print("먼저 `workctx init`을 실행하세요.", file=sys.stderr)
+        return 1
+    print(state.read_text(encoding="utf-8"), end="")
+    return 0
+
+
+def parser() -> argparse.ArgumentParser:
+    cli = argparse.ArgumentParser(
+        prog="workctx",
+        description="Codex와 Claude가 공유하는 로컬 작업 상태를 관리합니다.",
+    )
+    commands = cli.add_subparsers(dest="command", required=True)
+    for name, help_text in (
+        ("init", "프로젝트에 작업 기록과 에이전트 안내를 만듭니다"),
+        ("show", "현재 프로젝트의 작업 기록을 표시합니다"),
+    ):
+        command = commands.add_parser(name, help=help_text)
+        command.add_argument("path", nargs="?", type=Path, default=Path.cwd(), help="프로젝트 폴더 (기본값: 현재 폴더)")
+    return cli
+
+
+def main() -> int:
+    args = parser().parse_args()
+    try:
+        if args.command == "init":
+            return init_project(args.path)
+        return show_project(args.path)
+    except (OSError, UnicodeError) as error:
+        print(f"오류: {error}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
